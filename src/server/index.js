@@ -7,6 +7,7 @@ const bcrypt = require('bcrypt');
 const salt = 10;
 const cookieParser = require('cookie-parser')
 const cookieSession = require('cookie-session')
+const { exec } = require('child_process');
 
 const jwt = require('jsonwebtoken')
 
@@ -38,11 +39,40 @@ async function getAllAccountsByClient(id) {
     return rows;
 }
 
-async function getAccountPayments(id) {
-    const rows = await connection.query("SELECT account_from, account_to, Payment.amount AS amount, date, Payment.status AS status, title FROM Payment INNER JOIN Account ON account_from = ? OR account_to = ? ORDER BY date DESC", [id, id]);
+async function getAllAccounts(id) {
+    const rows = await connection.query('SELECT number FROM Account WHERE number != ? ', [id]);
     console.log(rows);
     return rows;
 }
+
+async function getAccountPayments(id) {
+    const rows = await connection.query("SELECT DISTINCT Payment.id AS id, account_from, account_to, Payment.amount AS amount, date, Payment.status AS status, title FROM Payment INNER JOIN Account ON account_from = ? ORDER BY date DESC", [id]);
+    console.log(rows);
+    return rows;
+}
+
+async function getAccountPaymentsF(id, filter) {
+    let s1 = '%'.concat(filter);
+    let s2 = s1.concat('%');
+    const rows = await connection.query("SELECT DISTINCT Payment.id AS id, account_from, account_to, Payment.amount AS amount, date, Payment.status AS status, title FROM Payment INNER JOIN Account ON account_from = ? WHERE (SELECT number FROM Account WHERE Account.id = account_to) LIKE ? ORDER BY date DESC", [id, s2]);
+    console.log(rows);
+    return rows;
+}
+
+async function getAccountIncomes(id) {
+    const rows = await connection.query("SELECT DISTINCT Payment.id AS id, account_from, account_to, Payment.amount AS amount, date, Payment.status AS status, title FROM Payment INNER JOIN Account ON account_to = ? ORDER BY date DESC", [id]);
+    console.log(rows);
+    return rows;
+}
+
+async function getAccountIncomesF(id) {
+    let s1 = '%'.concat(filter);
+    let s2 = s1.concat('%');
+    const rows = await connection.query("SELECT DISTINCT Payment.id AS id, account_from, account_to, Payment.amount AS amount, date, Payment.status AS status, title FROM Payment INNER JOIN Account ON account_to = ? WHERE (SELECT number FROM Account WHERE Account.id = account_from) LIKE ? ORDER BY date DESC", [id, s2]);
+    console.log(rows);
+    return rows;
+}
+
 async function getUserInfo(id) {
     const rows = await connection.query("SELECT email, creation_date, Role.name FROM User INNER JOIN Users_Roles ON User.id = user_id INNER JOIN Role ON role_id = Role.id WHERE User.id = ? ORDER BY Role.id DESC", [id]);
     console.log(rows[0]);
@@ -62,8 +92,49 @@ async function validateUserAccountNum(userID, accountNum) {
 }
 
 async function makePayment(source, target, amount, title) {
-    const rows = await connection.query('CALL makePayment(?, ?, ?, ?)', [source, target, -1, title]);
+    console.log("DSASADSADSADSADSDSADSA")
+    console.log(source)
+    console.log(target)
+    console.log(amount)
+    console.log(title)
+
+    const rows = await connection.query('CALL makePayment(?, ?, ?, ?)', [source, target, amount, title]);
     console.log(rows);
+    return rows;
+}
+
+async function makePayment(source, amount, title, array) {
+    const rows = await connection.query('CALL pay(?, ?, ?, ?)', [source, amount, title, array]);
+    console.log(rows);
+    return rows;
+}
+
+async function chargebackPayment(source, payment) {
+    const rows = await connection.query('CALL chargebackPayment(?, ?)', [payment, source]);
+    console.log(rows);
+    return rows;
+}
+
+async function backupDatabase() {
+    exec(`MYSQL_PWD=password mysqldump -u${exportFrom.user}  -h${exportFrom.host} --databases ${exportFrom.database} > ${dumpFile}`, (err, stdout, stderr) => {
+	    if (err) { console.error(`exec error: ${err}`); return 0; }
+    });
+    return 1;
+}
+
+async function loadDatabase() {
+    exec(`MYSQL_PWD=password mysql -u${importTo.user} -h${importTo.host} ${importTo.database} < ${dumpFile}`, (err, stdout, stderr) => {
+        if (err) { console.error(`exec error: ${err}`); return 0; }
+});
+    return 1;
+}
+
+
+         
+
+async function isAdmin(id) {
+    const rows = await connection.query('SELECT COUNT(*) as count FROM User u INNER JOIN Users_Roles ur ON u.id = ur.user_id INNER JOIN Role r ON ur.role_id = r.id WHERE u.id = ? AND r.name = "admin"', [id]);
+    console.log("ROWS " + rows);
     return rows;
 }
 
@@ -90,15 +161,44 @@ let strategy = new JwtStrategy(jwtOptions, function(jwt_payload, next) {
 
 passport.use(strategy);
 
-let connection = mysql.createConnection({
+let connection1 = mysql.createConnection({
     host: 'localhost',
-    user: 'root',
-    password: 'L712T0la.',
+    user: 'user',
+    password: 'password',
     database: 'project'
   })
-connection.query = util.promisify(connection.query).bind(connection);
 
-connection.connect()
+  let connection2 = mysql.createConnection({
+    host: 'localhost',
+    user: 'admin',
+    password: 'password',
+    database: 'project'
+  })
+
+let dumpFile = '/tmp/dump.sql';	
+
+let exportFrom = {
+    host: "localhost",
+    user: "root",
+    password: "password",
+    database: "project"
+}
+let importTo = {
+	host: "localhost",
+	user: "root",
+	password: "password",
+	database: "backup_project"
+}
+
+connection2.query = util.promisify(connection2.query).bind(connection2);
+
+connection2.connect()
+
+connection1.query = util.promisify(connection1.query).bind(connection1);
+
+connection1.connect()
+
+let connection = connection1;
 
 app.use(cookieParser());
 app.use(bodyParser());
@@ -125,8 +225,17 @@ app.post('/api/login', async function (req, res, next) {
         if (bcrypt.compareSync(password, user.password)) {
             let payload = {id: user.id};
             let token = jwt.sign(payload, jwtOptions.secretOrKey);
+            let ret = await isAdmin(user.id);
+            if (ret[0].count)
+            {
+                connection = connection2;
+            }
             res.json({ msg: 'ok', token: token });
-        }3
+        } 
+        else
+        {
+            res.status(401).json({message: 'Wrong email or password'});
+        }
     } else {
         res.status(401).json({message: 'Need email and password'});
     }
@@ -163,20 +272,76 @@ app.get('/api/accounts', passport.authenticate('jwt', { session: false}), async 
     console.log(user.id);
 
     const rows = await getAllAccountsByClient(user.id);
-    console.log("DUPA");
     console.log(rows[0]);
     res.json(rows);
 });
 
-app.post('/api/payment', async function (req, res, next) {
-    const {user, source, target, amount, title} = req.body;
-    const validation = await validateUserAccountNum(user, source);
+app.post('/api/payment', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const {source, amount, title, array} = req.body;
+    let user = await req.user;
+    const validation = await validateUserAccountNum(user.id, source);
     console.log(validation.count)
+    console.log(source)
+    console.log(user)
     if (validation.count)
     {
-        const ret = await makePayment(source, target, amount, title);
+        const ret = await makePayment(source, amount, title, array);
         console.log(ret);
-        res.json(rows);    
+        res.json(ret);    
+    }
+    else
+    {
+        res.status(401).json({message: 'Error'});
+    }
+});
+
+
+app.get('/api/savebackup', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    let user = await req.user;
+    const validation = await isAdmin(user.id);
+    console.log(validation[0].count)
+    
+    if (validation[0].count)
+    {
+        const ret = await backupDatabase();
+        console.log(ret);
+        res.json({message: 'ok'});    
+    }
+    else
+    {
+        res.status(401).json({message: 'Error'});
+    }
+});
+
+app.get('/api/loadbackup', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    let user = await req.user;
+    const validation = await isAdmin(user.id);
+    console.log(validation[0].count)
+    
+    if (validation[0].count)
+    {
+        const ret = await loadDatabase();
+        console.log(ret);
+        res.json({message: 'ok'});    
+    }
+    else
+    {
+        res.status(401).json({message: 'Error'});
+    }
+});
+
+app.post('/api/chargeback', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const {source, payment} = req.body;
+    let user = await req.user;
+    const validation = await validateUserAccount(user.id, source);
+    console.log(validation.count)
+    console.log(source)
+    console.log(user)
+    if (validation.count)
+    {
+        const ret = await chargebackPayment(source, payment);
+        console.log(ret);
+        res.json({message: 'ok'});    
     }
     else
     {
@@ -200,15 +365,69 @@ app.post('/api/transaction', async function (req, res, next) {
     }
 });
 
-app.get('/api/payments', passport.authenticate('jwt', { session: false}), async function (req, res) {
+app.post('/api/payments', passport.authenticate('jwt', { session: false}), async function (req, res) {
     const { account } = req.body;
     let user = await req.user;
     console.log('account: ' + account);
-    const validation = await validateUserAccountNum(user.id, account);
+    const validation = await validateUserAccount(user.id, account);
     console.log(validation.count)
     if (validation.count)
     {
         const rows = await getAccountPayments(account);
+        console.log(rows[0]);
+        res.json(rows);    
+    }
+    else
+    {
+        res.status(401).json({message: 'Not your account'});
+    }
+});
+
+app.post('/api/paymentsf', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const { account, filter } = req.body;
+    let user = await req.user;
+    console.log('account: ' + account);
+    const validation = await validateUserAccount(user.id, account);
+    console.log(validation.count)
+    if (validation.count)
+    {
+        const rows = await getAccountPaymentsF(account, filter);
+        console.log(rows[0]);
+        res.json(rows);    
+    }
+    else
+    {
+        res.status(401).json({message: 'Not your account'});
+    }
+});
+
+app.post('/api/incomesf', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const { account, filter } = req.body;
+    let user = await req.user;
+    console.log('account: ' + account);
+    const validation = await validateUserAccount(user.id, account);
+    console.log(validation.count)
+    if (validation.count)
+    {
+        const rows = await getAccountIncomesF(account, filter);
+        console.log(rows[0]);
+        res.json(rows);    
+    }
+    else
+    {
+        res.status(401).json({message: 'Not your account'});
+    }
+});
+
+app.post('/api/incomes', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const { account } = req.body;
+    let user = await req.user;
+    console.log('account: ' + account);
+    const validation = await validateUserAccount(user.id, account);
+    console.log(validation.count)
+    if (validation.count)
+    {
+        const rows = await getAccountIncomes(account);
         console.log(rows[0]);
         res.json(rows);    
     }
@@ -226,14 +445,30 @@ app.get('/api/user', passport.authenticate('jwt', { session: false}), async func
     res.json(rows);
 });
 
-app.get('/api/accounts', passport.authenticate('jwt', { session: false}), async function (req, res) {
+app.get('/api/privileges', passport.authenticate('jwt', { session: false}), async function (req, res) {
     let user = await req.user;
-    console.log(user.id);
-
-    const rows = await getAllAccountsByClient(user.id);
-    console.log(rows[0]);
+    const rows = await isAdmin(user.id);
+    console.log("TEST" + rows[0].count);
     res.json(rows);
 });
 
+
+app.post('/api/allaccounts', passport.authenticate('jwt', { session: false}), async function (req, res) {
+    const { account } = req.body;
+    let user = await req.user;
+    console.log('account: ' + account);
+    const validation = await validateUserAccountNum(user.id, account);
+    console.log(validation.count)
+    if (validation.count)
+    {
+        const rows = await getAllAccounts(account);
+        console.log(rows[0]);
+        res.json(rows);    
+    }
+    else
+    {
+        res.status(401).json({message: 'Not your account'});
+    }
+});
 
 app.listen(process.env.PORT || 8080, () => console.log(`Listening on port ${process.env.PORT || 8080}!`));
